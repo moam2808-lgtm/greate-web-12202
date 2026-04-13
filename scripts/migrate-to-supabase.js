@@ -1,41 +1,85 @@
+#!/usr/bin/env node
+
 import pg from 'pg';
-import * as fs from 'fs';
-import * as path from 'path';
+import fs from 'fs';
+import path from 'path';
 import { fileURLToPath } from 'url';
 
-const { Pool } = pg;
+// Disable SSL certificate validation for Supabase in development
+process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-// Use Supabase connection string
-const pool = new Pool({
-  connectionString: process.env.SUPABASE_POSTGRES_URL || process.env.POSTGRES_PRISMA_URL,
-  ssl: { rejectUnauthorized: false }
-});
+const { Pool } = pg;
 
 async function runMigration() {
-  const client = await pool.connect();
-  
+  // Use Supabase connection string
+  const connectionString = process.env.SUPABASE_POSTGRES_URL;
+
+  if (!connectionString) {
+    console.error('❌ Error: SUPABASE_POSTGRES_URL environment variable not set');
+    process.exit(1);
+  }
+
+  const pool = new Pool({
+    connectionString,
+    ssl: { rejectUnauthorized: false }
+  });
+
+  let client;
   try {
-    console.log('Starting migration to Supabase...');
+    console.log('📡 Connecting to Supabase...');
+    client = await pool.connect();
+    console.log('✅ Connected successfully!');
+
+    // Read schema.sql from project root - try multiple paths
+    console.log(`📍 Current working directory: ${process.cwd()}`);
     
-    // Read the schema file
-    const schemaPath = path.join(__dirname, '../schema.sql');
-    const schema = fs.readFileSync(schemaPath, 'utf8');
-    
+    const possiblePaths = [
+      path.join(process.cwd(), 'schema.sql'),
+      path.join(process.cwd(), '..', 'schema.sql'),
+      '/vercel/share/v0-project/schema.sql',
+      './schema.sql',
+      '../schema.sql'
+    ];
+
+    let schemaPath = null;
+    for (const candidate of possiblePaths) {
+      console.log(`  Checking: ${candidate}`);
+      if (fs.existsSync(candidate)) {
+        schemaPath = candidate;
+        console.log(`✓ Found at: ${schemaPath}`);
+        break;
+      }
+    }
+
+    if (!schemaPath) {
+      throw new Error(`Schema file not found. Tried: ${possiblePaths.join(', ')}`);
+    }
+
+    const schemaSql = fs.readFileSync(schemaPath, 'utf8');
+    console.log(`📊 Loaded schema (${(schemaSql.length / 1024).toFixed(2)}KB)`);
+
     // Execute the schema
-    console.log('Executing schema...');
-    await client.query(schema);
-    
-    console.log('✓ Migration completed successfully!');
-    console.log('✓ All tables created in Supabase');
-    
+    console.log('⚙️  Creating tables...');
+    await client.query(schemaSql);
+
+    console.log('✅ Migration completed successfully!');
+    console.log('✅ All tables created in Supabase');
+    console.log('\n📝 Next steps:');
+    console.log('1. Update DATABASE_URL in .env to use Supabase');
+    console.log('2. Set VITE_API_URL to same port for frontend');
+    console.log('3. Configure JWT_SECRET and other keys');
+
   } catch (error) {
-    console.error('✗ Migration failed:', error.message);
+    console.error('❌ Migration failed:', error.message);
+    if (error.code === 'SELF_SIGNED_CERT_IN_CHAIN') {
+      console.error('\n⚠️  SSL error - NODE_TLS_REJECT_UNAUTHORIZED is set to 0');
+    }
     process.exit(1);
   } finally {
-    await client.end();
+    if (client) await client.end();
     await pool.end();
   }
 }
